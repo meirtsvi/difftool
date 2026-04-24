@@ -123,7 +123,7 @@ class DiffEngine {
         var y = m
 
         for d in stride(from: trace.count - 1, through: 1, by: -1) {
-            let prevV = trace[d - 1]
+            let prevV = trace[d]
             let k = x - y
 
             var prevK: Int
