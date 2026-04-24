@@ -4,23 +4,25 @@ class DiffEngine {
 
     // MARK: - Public API
 
-    static func diff(leftURL: URL, rightURL: URL) -> FileDiffResult {
+    static func diff(leftURL: URL, rightURL: URL, leftOverride: String? = nil, rightOverride: String? = nil) -> FileDiffResult {
         let leftExists = FileManager.default.fileExists(atPath: leftURL.path)
         let rightExists = FileManager.default.fileExists(atPath: rightURL.path)
 
         let (leftData, leftEncoding) = leftExists ? readFile(at: leftURL) : (Data(), .utf8 as String.Encoding)
         let (rightData, rightEncoding) = rightExists ? readFile(at: rightURL) : (Data(), .utf8 as String.Encoding)
 
-        if (leftExists && isBinary(leftData)) || (rightExists && isBinary(rightData)) {
-            return FileDiffResult(
-                leftPath: leftURL, rightPath: rightURL,
-                lines: [], hunks: [], isBinary: true,
-                leftEncoding: leftEncoding, rightEncoding: rightEncoding
-            )
+        if leftOverride == nil && rightOverride == nil {
+            if (leftExists && isBinary(leftData)) || (rightExists && isBinary(rightData)) {
+                return FileDiffResult(
+                    leftPath: leftURL, rightPath: rightURL,
+                    lines: [], hunks: [], isBinary: true,
+                    leftEncoding: leftEncoding, rightEncoding: rightEncoding
+                )
+            }
         }
 
-        let leftText = leftExists ? (String(data: leftData, encoding: leftEncoding) ?? "") : ""
-        let rightText = rightExists ? (String(data: rightData, encoding: rightEncoding) ?? "") : ""
+        let leftText = leftOverride ?? (leftExists ? (String(data: leftData, encoding: leftEncoding) ?? "") : "")
+        let rightText = rightOverride ?? (rightExists ? (String(data: rightData, encoding: rightEncoding) ?? "") : "")
 
         // Handle single-side files
         if !leftExists && rightExists {
@@ -317,27 +319,15 @@ class DiffEngine {
 
     // MARK: - Merge Operations
 
-    static func copyLeftToRight(leftURL: URL, rightURL: URL, diffResult: FileDiffResult, hunkIndex: Int) -> Bool {
-        return copyHunk(from: leftURL, to: rightURL, diffResult: diffResult, hunkIndex: hunkIndex, direction: .leftToRight)
-    }
-
-    static func copyRightToLeft(leftURL: URL, rightURL: URL, diffResult: FileDiffResult, hunkIndex: Int) -> Bool {
-        return copyHunk(from: rightURL, to: leftURL, diffResult: diffResult, hunkIndex: hunkIndex, direction: .rightToLeft)
-    }
-
-    private enum MergeDirection {
+    enum MergeDirection {
         case leftToRight
         case rightToLeft
     }
 
-    private static func copyHunk(from sourceURL: URL, to destURL: URL, diffResult: FileDiffResult, hunkIndex: Int, direction: MergeDirection) -> Bool {
-        guard hunkIndex < diffResult.hunks.count else { return false }
-
-        let encoding: String.Encoding = direction == .leftToRight ? diffResult.rightEncoding : diffResult.leftEncoding
-        let destData = (try? Data(contentsOf: destURL)) ?? Data()
-        let destText = String(data: destData, encoding: encoding) ?? ""
-        var destLines = destText.components(separatedBy: "\n")
-
+    // Apply a hunk in-memory, returning new dest lines without writing to disk
+    static func applyHunkInMemory(destLines: [String], diffResult: FileDiffResult, hunkIndex: Int, direction: MergeDirection) -> [String]? {
+        guard hunkIndex < diffResult.hunks.count else { return nil }
+        var result = destLines
         let hunk = diffResult.hunks[hunkIndex]
         var sourceLines: [String] = []
         var destLineNumbers: [Int] = []
@@ -345,47 +335,44 @@ class DiffEngine {
         for line in hunk.lines {
             switch direction {
             case .leftToRight:
-                if let text = line.leftText {
-                    sourceLines.append(text)
-                }
-                if let num = line.rightLineNumber {
-                    destLineNumbers.append(num)
-                }
+                if let text = line.leftText { sourceLines.append(text) }
+                if let num = line.rightLineNumber { destLineNumbers.append(num) }
             case .rightToLeft:
-                if let text = line.rightText {
-                    sourceLines.append(text)
-                }
-                if let num = line.leftLineNumber {
-                    destLineNumbers.append(num)
-                }
+                if let text = line.rightText { sourceLines.append(text) }
+                if let num = line.leftLineNumber { destLineNumbers.append(num) }
             }
         }
 
-        // Replace dest lines with source lines at the hunk location
         if let firstDest = destLineNumbers.first {
             let startIdx = firstDest - 1
-            let removeCount = destLineNumbers.count
-            let safeStart = min(startIdx, destLines.count)
-            let safeEnd = min(safeStart + removeCount, destLines.count)
-            destLines.replaceSubrange(safeStart..<safeEnd, with: sourceLines)
+            let safeStart = min(startIdx, result.count)
+            let safeEnd = min(safeStart + destLineNumbers.count, result.count)
+            result.replaceSubrange(safeStart..<safeEnd, with: sourceLines)
         } else {
-            // All lines are new (added/removed), insert at hunk position
             let insertIdx: Int
             if direction == .leftToRight {
-                insertIdx = hunk.lines.first.flatMap { $0.rightLineNumber.map { $0 - 1 } } ?? destLines.count
+                insertIdx = hunk.lines.first.flatMap { $0.rightLineNumber.map { $0 - 1 } } ?? result.count
             } else {
-                insertIdx = hunk.lines.first.flatMap { $0.leftLineNumber.map { $0 - 1 } } ?? destLines.count
+                insertIdx = hunk.lines.first.flatMap { $0.leftLineNumber.map { $0 - 1 } } ?? result.count
             }
-            let safeIdx = min(insertIdx, destLines.count)
-            destLines.insert(contentsOf: sourceLines, at: safeIdx)
+            result.insert(contentsOf: sourceLines, at: min(insertIdx, result.count))
         }
+        return result
+    }
 
-        let newText = destLines.joined(separator: "\n")
-        do {
-            try newText.write(to: destURL, atomically: true, encoding: encoding)
-            return true
-        } catch {
-            return false
-        }
+    static func copyLeftToRight(leftURL: URL, rightURL: URL, diffResult: FileDiffResult, hunkIndex: Int) -> Bool {
+        let encoding = diffResult.rightEncoding
+        let destData = (try? Data(contentsOf: rightURL)) ?? Data()
+        let destLines = (String(data: destData, encoding: encoding) ?? "").components(separatedBy: "\n")
+        guard let newLines = applyHunkInMemory(destLines: destLines, diffResult: diffResult, hunkIndex: hunkIndex, direction: .leftToRight) else { return false }
+        return (try? newLines.joined(separator: "\n").write(to: rightURL, atomically: true, encoding: encoding)) != nil
+    }
+
+    static func copyRightToLeft(leftURL: URL, rightURL: URL, diffResult: FileDiffResult, hunkIndex: Int) -> Bool {
+        let encoding = diffResult.leftEncoding
+        let destData = (try? Data(contentsOf: leftURL)) ?? Data()
+        let destLines = (String(data: destData, encoding: encoding) ?? "").components(separatedBy: "\n")
+        guard let newLines = applyHunkInMemory(destLines: destLines, diffResult: diffResult, hunkIndex: hunkIndex, direction: .rightToLeft) else { return false }
+        return (try? newLines.joined(separator: "\n").write(to: leftURL, atomically: true, encoding: encoding)) != nil
     }
 }

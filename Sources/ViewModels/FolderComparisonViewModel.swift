@@ -48,7 +48,7 @@ class FolderComparisonViewModel: ObservableObject {
         case .all:
             break
         case .differencesOnly:
-            filtered = filtered.filter { $0.status != .identical }
+            filtered = filtered.filter { $0.status == .modified }
         case .leftOnly:
             filtered = filtered.filter { $0.status == .leftOnly }
         case .rightOnly:
