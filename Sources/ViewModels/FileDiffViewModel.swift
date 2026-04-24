@@ -6,6 +6,7 @@ class FileDiffViewModel: ObservableObject {
     @Published var diffResult: FileDiffResult?
     @Published var currentHunkIndex: Int = 0
     @Published var isLoading = false
+    @Published var hasUnsavedChanges = false
 
     let leftFolderURL: URL
     let rightFolderURL: URL
@@ -16,6 +17,9 @@ class FileDiffViewModel: ObservableObject {
 
     var hunkCount: Int { diffResult?.hunks.count ?? 0 }
 
+    private var leftModifiedText: String? = nil
+    private var rightModifiedText: String? = nil
+
     init(file: FileComparisonResult, leftFolder: URL, rightFolder: URL) {
         self.file = file
         self.leftFolderURL = leftFolder
@@ -24,8 +28,8 @@ class FileDiffViewModel: ObservableObject {
 
     func computeDiff() {
         isLoading = true
-        let result = DiffEngine.diff(leftURL: leftFileURL, rightURL: rightFileURL)
-        diffResult = result
+        diffResult = DiffEngine.diff(leftURL: leftFileURL, rightURL: rightFileURL,
+                                     leftOverride: leftModifiedText, rightOverride: rightModifiedText)
         currentHunkIndex = 0
         isLoading = false
     }
@@ -41,15 +45,43 @@ class FileDiffViewModel: ObservableObject {
 
     func copyLeftToRight() {
         guard let diff = diffResult else { return }
-        if DiffEngine.copyLeftToRight(leftURL: leftFileURL, rightURL: rightFileURL, diffResult: diff, hunkIndex: currentHunkIndex) {
+        let currentText = rightModifiedText ?? (try? String(contentsOf: rightFileURL, encoding: diff.rightEncoding)) ?? ""
+        let destLines = currentText.components(separatedBy: "\n")
+        if let newLines = DiffEngine.applyHunkInMemory(destLines: destLines, diffResult: diff, hunkIndex: currentHunkIndex, direction: .leftToRight) {
+            rightModifiedText = newLines.joined(separator: "\n")
+            hasUnsavedChanges = true
             computeDiff()
         }
     }
 
     func copyRightToLeft() {
         guard let diff = diffResult else { return }
-        if DiffEngine.copyRightToLeft(leftURL: leftFileURL, rightURL: rightFileURL, diffResult: diff, hunkIndex: currentHunkIndex) {
+        let currentText = leftModifiedText ?? (try? String(contentsOf: leftFileURL, encoding: diff.leftEncoding)) ?? ""
+        let destLines = currentText.components(separatedBy: "\n")
+        if let newLines = DiffEngine.applyHunkInMemory(destLines: destLines, diffResult: diff, hunkIndex: currentHunkIndex, direction: .rightToLeft) {
+            leftModifiedText = newLines.joined(separator: "\n")
+            hasUnsavedChanges = true
             computeDiff()
         }
+    }
+
+    func saveChanges() {
+        guard let diff = diffResult else { return }
+        if let text = leftModifiedText {
+            try? text.write(to: leftFileURL, atomically: true, encoding: diff.leftEncoding)
+            leftModifiedText = nil
+        }
+        if let text = rightModifiedText {
+            try? text.write(to: rightFileURL, atomically: true, encoding: diff.rightEncoding)
+            rightModifiedText = nil
+        }
+        hasUnsavedChanges = false
+    }
+
+    func discardChanges() {
+        leftModifiedText = nil
+        rightModifiedText = nil
+        hasUnsavedChanges = false
+        computeDiff()
     }
 }

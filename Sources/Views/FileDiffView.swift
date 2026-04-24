@@ -3,8 +3,17 @@ import SwiftUI
 struct FileDiffView: View {
     @ObservedObject var viewModel: FileDiffViewModel
     let onDismiss: () -> Void
-    
+
     @State private var wordWrap = false
+    @State private var showDismissAlert = false
+
+    private func attemptDismiss() {
+        if viewModel.hasUnsavedChanges {
+            showDismissAlert = true
+        } else {
+            onDismiss()
+        }
+    }
 
     private let lineH: CGFloat = 20
     private let gutterW: CGFloat = 44
@@ -33,13 +42,20 @@ struct FileDiffView: View {
         }
         .frame(minWidth: 900, minHeight: 600)
         .onAppear { viewModel.computeDiff() }
+        .alert("Save changes?", isPresented: $showDismissAlert) {
+            Button("Save") { viewModel.saveChanges(); onDismiss() }
+            Button("Discard", role: .destructive) { viewModel.discardChanges(); onDismiss() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You have unsaved changes. Save them before leaving?")
+        }
     }
 
     // MARK: - Toolbar
 
     private var diffToolbar: some View {
         HStack(spacing: 12) {
-            Button(action: onDismiss) {
+            Button(action: attemptDismiss) {
                 Image(systemName: "chevron.left")
                 Text("Back")
             }
@@ -114,40 +130,46 @@ struct FileDiffView: View {
             .frame(height: 28)
             Divider()
 
-            // Single scroll view for both panes — guarantees sync
-            ScrollViewReader { proxy in
-                ScrollView(wordWrap ? [.vertical] : [.vertical, .horizontal]) {
-                    ZStack(alignment: .top) {
-                        HStack(spacing: 0) {
-                            // Left pane
-                            VStack(spacing: 0) {
-                                ForEach(Array(diff.lines.enumerated()), id: \.offset) { index, line in
-                                    leftLineRow(line: line, index: index)
+            HStack(spacing: 0) {
+                // Single scroll view for both panes — guarantees sync
+                ScrollViewReader { proxy in
+                    ScrollView(wordWrap ? [.vertical] : [.vertical, .horizontal]) {
+                        ZStack(alignment: .top) {
+                            HStack(spacing: 0) {
+                                // Left pane
+                                VStack(spacing: 0) {
+                                    ForEach(Array(diff.lines.enumerated()), id: \.offset) { index, line in
+                                        leftLineRow(line: line, index: index)
+                                    }
                                 }
-                            }
-                            .frame(minWidth: 400)
+                                .frame(minWidth: 400)
 
-                            // Center connector column
-                            centerConnectorColumn(diff: diff)
-                                .frame(width: centerW)
+                                // Center connector column
+                                centerConnectorColumn(diff: diff)
+                                    .frame(width: centerW)
 
-                            // Right pane
-                            VStack(spacing: 0) {
-                                ForEach(Array(diff.lines.enumerated()), id: \.offset) { index, line in
-                                    rightLineRow(line: line, index: index)
-                                        .id("line\(index)")
+                                // Right pane
+                                VStack(spacing: 0) {
+                                    ForEach(Array(diff.lines.enumerated()), id: \.offset) { index, line in
+                                        rightLineRow(line: line, index: index)
+                                            .id("line\(index)")
+                                    }
                                 }
+                                .frame(minWidth: 400)
                             }
-                            .frame(minWidth: 400)
+                        }
+                    }
+                    .onChange(of: viewModel.currentHunkIndex) { _, newValue in
+                        if newValue < diff.hunks.count {
+                            let hunk = diff.hunks[newValue]
+                            withAnimation { proxy.scrollTo("line\(hunk.startIndex)", anchor: .center) }
                         }
                     }
                 }
-                .onChange(of: viewModel.currentHunkIndex) { _, newValue in
-                    if newValue < diff.hunks.count {
-                        let hunk = diff.hunks[newValue]
-                        withAnimation { proxy.scrollTo("line\(hunk.startIndex)", anchor: .center) }
-                    }
-                }
+
+                // Diff overview map
+                DiffMapView(hunks: diff.hunks, totalLines: diff.lines.count, currentHunkIndex: viewModel.currentHunkIndex)
+                    .frame(width: 12)
             }
         }
     }
@@ -361,6 +383,36 @@ struct FileDiffView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+// MARK: - Diff Map (overview ruler)
+
+struct DiffMapView: View {
+    let hunks: [DiffHunk]
+    let totalLines: Int
+    let currentHunkIndex: Int
+
+    var body: some View {
+        Canvas { context, size in
+            let total = max(totalLines, 1)
+            for (i, hunk) in hunks.enumerated() {
+                let yStart = CGFloat(hunk.startIndex) / CGFloat(total) * size.height
+                let yEnd = CGFloat(hunk.endIndex + 1) / CGFloat(total) * size.height
+                let h = max(yEnd - yStart, 2)
+                let color = i == currentHunkIndex ? Color.accentColor : hunkColor(hunk)
+                context.fill(Path(CGRect(x: 1, y: yStart, width: size.width - 2, height: h)),
+                             with: .color(color.opacity(i == currentHunkIndex ? 0.9 : 0.6)))
+            }
+        }
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.4))
+    }
+
+    private func hunkColor(_ hunk: DiffHunk) -> Color {
+        let types = Set(hunk.lines.map { $0.type })
+        if types.contains(.modified) { return .red }
+        if types.contains(.added) { return .blue }
+        return .orange
     }
 }
 
