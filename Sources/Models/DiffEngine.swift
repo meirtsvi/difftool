@@ -349,11 +349,20 @@ class DiffEngine {
             let safeEnd = min(safeStart + destLineNumbers.count, result.count)
             result.replaceSubrange(safeStart..<safeEnd, with: sourceLines)
         } else {
-            let insertIdx: Int
-            if direction == .leftToRight {
-                insertIdx = hunk.lines.first.flatMap { $0.rightLineNumber.map { $0 - 1 } } ?? result.count
-            } else {
-                insertIdx = hunk.lines.first.flatMap { $0.leftLineNumber.map { $0 - 1 } } ?? result.count
+            // Pure removed (dest is left) or pure added (dest is right) hunk —
+            // no destination line numbers exist on the hunk itself. Find the
+            // nearest preceding line with a destination line number so we
+            // insert at the correct position instead of appending at EOF.
+            var insertIdx = 0
+            if hunk.startIndex > 0 {
+                for i in stride(from: hunk.startIndex - 1, through: 0, by: -1) {
+                    let line = diffResult.lines[i]
+                    let num = direction == .leftToRight ? line.rightLineNumber : line.leftLineNumber
+                    if let n = num {
+                        insertIdx = n
+                        break
+                    }
+                }
             }
             result.insert(contentsOf: sourceLines, at: min(insertIdx, result.count))
         }

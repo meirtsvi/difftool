@@ -4,7 +4,7 @@ struct FileDiffView: View {
     @ObservedObject var viewModel: FileDiffViewModel
     let onDismiss: () -> Void
 
-    @State private var wordWrap = false
+    @AppStorage("diffWordWrap") private var wordWrap = false
     @State private var showDismissAlert = false
 
     private func attemptDismiss() {
@@ -47,7 +47,20 @@ struct FileDiffView: View {
             Button("Discard", role: .destructive) { viewModel.discardChanges(); onDismiss() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("You have unsaved changes. Save them before leaving?")
+            Text(unsavedChangesMessage)
+        }
+    }
+
+    private var unsavedChangesMessage: String {
+        switch (viewModel.hasUnsavedLeft, viewModel.hasUnsavedRight) {
+        case (true, true):
+            return "You have unsaved changes in both files. Save them before leaving?"
+        case (true, false):
+            return "You have unsaved changes in the left file. Save them before leaving?"
+        case (false, true):
+            return "You have unsaved changes in the right file. Save them before leaving?"
+        case (false, false):
+            return "You have unsaved changes. Save them before leaving?"
         }
     }
 
@@ -110,6 +123,28 @@ struct FileDiffView: View {
             }
             .keyboardShortcut(.rightArrow, modifiers: .command)
             .help("Copy left → right")
+
+            Divider().frame(height: 24)
+
+            Button(action: { viewModel.saveLeft() }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "square.and.arrow.down")
+                    Text("Save Left")
+                }
+            }
+            .keyboardShortcut("s", modifiers: [.command, .shift])
+            .disabled(!viewModel.hasUnsavedLeft)
+            .help("Save changes to left file (⇧⌘S)")
+
+            Button(action: { viewModel.saveRight() }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "square.and.arrow.down")
+                    Text("Save Right")
+                }
+            }
+            .keyboardShortcut("s", modifiers: .command)
+            .disabled(!viewModel.hasUnsavedRight)
+            .help("Save changes to right file (⌘S)")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -119,6 +154,11 @@ struct FileDiffView: View {
     // MARK: - Synced Diff (single ScrollView)
 
     private func syncedDiffView(diff: FileDiffResult) -> some View {
+        syncedDiffViewBody(diff: diff)
+            .environment(\.layoutDirection, .leftToRight)
+    }
+
+    private func syncedDiffViewBody(diff: FileDiffResult) -> some View {
         VStack(spacing: 0) {
             // Headers
             HStack(spacing: 0) {
@@ -131,37 +171,34 @@ struct FileDiffView: View {
             Divider()
 
             HStack(spacing: 0) {
-                // Single scroll view for both panes — guarantees sync
+                // Outer vertical-only scroll keeps panes synchronized vertically.
+                // Each pane has its own inner horizontal ScrollView so horizontal
+                // overflow shows a per-pane scrollbar only where needed.
                 ScrollViewReader { proxy in
-                    ScrollView(wordWrap ? [.vertical] : [.vertical, .horizontal]) {
-                        ZStack(alignment: .top) {
-                            HStack(spacing: 0) {
-                                // Left pane
-                                VStack(spacing: 0) {
-                                    ForEach(Array(diff.lines.enumerated()), id: \.offset) { index, line in
-                                        leftLineRow(line: line, index: index)
-                                    }
-                                }
-                                .frame(minWidth: 400)
+                    ScrollView(.vertical) {
+                        HStack(spacing: 0) {
+                            paneView(diff: diff, side: .left)
+                                .frame(minWidth: 400, maxWidth: .infinity)
 
-                                // Center connector column
-                                centerConnectorColumn(diff: diff)
-                                    .frame(width: centerW)
+                            centerConnectorColumn(diff: diff)
+                                .frame(width: centerW)
 
-                                // Right pane
-                                VStack(spacing: 0) {
-                                    ForEach(Array(diff.lines.enumerated()), id: \.offset) { index, line in
-                                        rightLineRow(line: line, index: index)
-                                            .id("line\(index)")
-                                    }
-                                }
-                                .frame(minWidth: 400)
-                            }
+                            paneView(diff: diff, side: .right)
+                                .frame(minWidth: 400, maxWidth: .infinity)
                         }
                     }
                     .onChange(of: viewModel.currentHunkIndex) { _, newValue in
                         if newValue < diff.hunks.count {
                             let hunk = diff.hunks[newValue]
+                            withAnimation { proxy.scrollTo("line\(hunk.startIndex)", anchor: .center) }
+                        }
+                    }
+                    .onChange(of: viewModel.scrollRequestID) { _, _ in
+                        // Fires after copy operations, when the current hunk
+                        // collapses and the next one slides into the same index.
+                        if let currentDiff = viewModel.diffResult,
+                           viewModel.currentHunkIndex < currentDiff.hunks.count {
+                            let hunk = currentDiff.hunks[viewModel.currentHunkIndex]
                             withAnimation { proxy.scrollTo("line\(hunk.startIndex)", anchor: .center) }
                         }
                     }
@@ -240,64 +277,78 @@ struct FileDiffView: View {
         .background(Color(nsColor: .controlBackgroundColor))
     }
 
-    // MARK: - Line Rows
+    // MARK: - Panes
 
-    private func leftLineRow(line: DiffLine, index: Int) -> some View {
+    private func paneView(diff: FileDiffResult, side: DiffSide) -> some View {
         HStack(spacing: 0) {
-            Text(line.leftLineNumber.map { String($0) } ?? "")
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(.secondary)
-                .frame(width: gutterW, alignment: .trailing)
-                .padding(.trailing, 6)
-                .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
-
-            Group {
-                if let text = line.leftText {
-                    if line.type == .modified, let changes = line.inlineChanges, !changes.isEmpty {
-                        buildHighlightedText(text: text, changes: changes, side: .left)
-                    } else {
-                        Text(text)
-                    }
-                } else {
-                    Text("")
+            // Fixed gutter column — not horizontally scrollable.
+            VStack(spacing: 0) {
+                ForEach(Array(diff.lines.enumerated()), id: \.offset) { index, line in
+                    gutterCell(line: line, index: index, side: side)
                 }
             }
-            .font(.system(size: 12, design: .monospaced))
-            .if(!wordWrap) { $0.fixedSize(horizontal: true, vertical: false) }
+
+            // Content column — per-pane horizontal scroll when word wrap is off.
+            Group {
+                if wordWrap {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(diff.lines.enumerated()), id: \.offset) { index, line in
+                            lineContentCell(line: line, index: index, side: side)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    ScrollView(.horizontal, showsIndicators: true) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(Array(diff.lines.enumerated()), id: \.offset) { index, line in
+                                lineContentCell(line: line, index: index, side: side)
+                            }
+                        }
+                    }
+                }
+            }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 4)
         }
-        .frame(height: lineH)
-        .background(leftBg(line, index))
     }
 
-    private func rightLineRow(line: DiffLine, index: Int) -> some View {
-        HStack(spacing: 0) {
-            Text(line.rightLineNumber.map { String($0) } ?? "")
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(.secondary)
-                .frame(width: gutterW, alignment: .trailing)
-                .padding(.trailing, 6)
-                .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
-
-            Group {
-                if let text = line.rightText {
-                    if line.type == .modified, let changes = line.inlineChanges, !changes.isEmpty {
-                        buildHighlightedText(text: text, changes: changes, side: .right)
-                    } else {
-                        Text(text)
-                    }
-                } else {
-                    Text("")
-                }
-            }
-            .font(.system(size: 12, design: .monospaced))
-            .if(!wordWrap) { $0.fixedSize(horizontal: true, vertical: false) }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 4)
+    private func gutterCell(line: DiffLine, index: Int, side: DiffSide) -> some View {
+        let lineNumber = side == .left ? line.leftLineNumber : line.rightLineNumber
+        let bg = side == .left ? leftBg(line, index) : rightBg(line, index)
+        let view = Text(lineNumber.map { String($0) } ?? "")
+            .font(.system(size: 11, design: .monospaced))
+            .foregroundColor(.secondary)
+            .frame(width: gutterW, alignment: .trailing)
+            .padding(.trailing, 6)
+            .frame(height: lineH)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
+            .background(bg)
+        if side == .right {
+            return AnyView(view.id("line\(index)"))
         }
-        .frame(height: lineH)
-        .background(rightBg(line, index))
+        return AnyView(view)
+    }
+
+    private func lineContentCell(line: DiffLine, index: Int, side: DiffSide) -> some View {
+        let text = side == .left ? line.leftText : line.rightText
+        let bg = side == .left ? leftBg(line, index) : rightBg(line, index)
+        return Group {
+            if let text {
+                if line.type == .modified, let changes = line.inlineChanges, !changes.isEmpty {
+                    buildHighlightedText(text: text, changes: changes, side: side)
+                } else {
+                    Text(text)
+                }
+            } else {
+                Text("")
+            }
+        }
+        .font(.system(size: 12, design: .monospaced))
+        .lineLimit(wordWrap ? nil : 1)
+        .fixedSize(horizontal: !wordWrap, vertical: false)
+        .frame(maxWidth: wordWrap ? .infinity : nil, alignment: .leading)
+        .frame(height: lineH, alignment: .leading)
+        .padding(.horizontal, 4)
+        .background(bg)
     }
 
     // MARK: - Backgrounds

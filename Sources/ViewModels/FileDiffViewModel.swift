@@ -6,7 +6,14 @@ class FileDiffViewModel: ObservableObject {
     @Published var diffResult: FileDiffResult?
     @Published var currentHunkIndex: Int = 0
     @Published var isLoading = false
-    @Published var hasUnsavedChanges = false
+    @Published var hasUnsavedLeft = false
+    @Published var hasUnsavedRight = false
+    // Bumped whenever the view should scroll to the current hunk even if
+    // `currentHunkIndex` didn't change (e.g., after a copy collapses the
+    // current hunk and the next hunk slides into the same index).
+    @Published private(set) var scrollRequestID: Int = 0
+
+    var hasUnsavedChanges: Bool { hasUnsavedLeft || hasUnsavedRight }
 
     let leftFolderURL: URL
     let rightFolderURL: URL
@@ -26,11 +33,18 @@ class FileDiffViewModel: ObservableObject {
         self.rightFolderURL = rightFolder
     }
 
-    func computeDiff() {
+    func computeDiff(resetHunkIndex: Bool = true) {
         isLoading = true
         diffResult = DiffEngine.diff(leftURL: leftFileURL, rightURL: rightFileURL,
                                      leftOverride: leftModifiedText, rightOverride: rightModifiedText)
-        currentHunkIndex = 0
+        let newCount = diffResult?.hunks.count ?? 0
+        if resetHunkIndex || newCount == 0 {
+            currentHunkIndex = 0
+        } else {
+            // Keep the same index; the hunk that was current is now resolved,
+            // so this index points at what used to be the next hunk.
+            currentHunkIndex = min(currentHunkIndex, newCount - 1)
+        }
         isLoading = false
     }
 
@@ -49,8 +63,9 @@ class FileDiffViewModel: ObservableObject {
         let destLines = currentText.components(separatedBy: "\n")
         if let newLines = DiffEngine.applyHunkInMemory(destLines: destLines, diffResult: diff, hunkIndex: currentHunkIndex, direction: .leftToRight) {
             rightModifiedText = newLines.joined(separator: "\n")
-            hasUnsavedChanges = true
-            computeDiff()
+            hasUnsavedRight = true
+            computeDiff(resetHunkIndex: false)
+            scrollRequestID &+= 1
         }
     }
 
@@ -60,28 +75,36 @@ class FileDiffViewModel: ObservableObject {
         let destLines = currentText.components(separatedBy: "\n")
         if let newLines = DiffEngine.applyHunkInMemory(destLines: destLines, diffResult: diff, hunkIndex: currentHunkIndex, direction: .rightToLeft) {
             leftModifiedText = newLines.joined(separator: "\n")
-            hasUnsavedChanges = true
-            computeDiff()
+            hasUnsavedLeft = true
+            computeDiff(resetHunkIndex: false)
+            scrollRequestID &+= 1
         }
     }
 
+    func saveLeft() {
+        guard let diff = diffResult, let text = leftModifiedText else { return }
+        try? text.write(to: leftFileURL, atomically: true, encoding: diff.leftEncoding)
+        leftModifiedText = nil
+        hasUnsavedLeft = false
+    }
+
+    func saveRight() {
+        guard let diff = diffResult, let text = rightModifiedText else { return }
+        try? text.write(to: rightFileURL, atomically: true, encoding: diff.rightEncoding)
+        rightModifiedText = nil
+        hasUnsavedRight = false
+    }
+
     func saveChanges() {
-        guard let diff = diffResult else { return }
-        if let text = leftModifiedText {
-            try? text.write(to: leftFileURL, atomically: true, encoding: diff.leftEncoding)
-            leftModifiedText = nil
-        }
-        if let text = rightModifiedText {
-            try? text.write(to: rightFileURL, atomically: true, encoding: diff.rightEncoding)
-            rightModifiedText = nil
-        }
-        hasUnsavedChanges = false
+        saveLeft()
+        saveRight()
     }
 
     func discardChanges() {
         leftModifiedText = nil
         rightModifiedText = nil
-        hasUnsavedChanges = false
+        hasUnsavedLeft = false
+        hasUnsavedRight = false
         computeDiff()
     }
 }
